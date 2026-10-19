@@ -98,6 +98,9 @@ td a{color:var(--accent);font-weight:600}
 .chart .grid{stroke:var(--rule);stroke-width:1}
 .chart .bar{fill:var(--accent)}
 .chart .bar.part{fill:url(#hatch)}
+.chart .bar.unc{fill:transparent;stroke:var(--accent);stroke-width:1.5;stroke-dasharray:3 2}
+.sw.unc{background:transparent;border:1.5px dashed var(--accent)}
+.fix{font-size:.72rem;font-weight:600;color:var(--muted);border-bottom:1px dotted var(--muted);cursor:help;margin-left:4px}
 .chart .bar:hover,.chart .mk:hover{opacity:.75}
 .chart .mk{fill:var(--warn)}
 .chart .now{stroke:var(--ink);stroke-width:1.5;stroke-dasharray:4 3}
@@ -177,6 +180,8 @@ tr.warnrow td{background:var(--warn-bg)}
       <li><strong>The older orders are scans.</strong> Letters are sometimes misread (for example "198l" for "1981"), so a search for an exact Act name can miss a document. Try a shorter or distinctive word.</li>
       <li><strong>Page numbers refer to the PDF</strong>, not the page number printed on the Gazette.</li>
       <li><strong>A long entry is sometimes split in two, or two entries joined,</strong> where the original ran over a line.</li>
+      <li><strong>Misread letters have been put right where the same Act is printed correctly elsewhere</strong> (for example "Navigation Act [9!2" becomes "Navigation Act 1912"). Entries changed this way are marked "corrected": point at the mark to see what the scan read.</li>
+      <li><strong>Some documents restate only some departments.</strong> The Act timeline carries the other departments on from the order before. A complete order that does not list an Act, when the complete orders either side of it do, is shown as a dashed bar: the line was most likely missed when the scan was read.</li>
     </ul>
     <h2>Known gaps</h2>
     <ul>
@@ -186,17 +191,35 @@ tr.warnrow td{background:var(--warn-bg)}
     <p id="built" class="meta" style="color:var(--muted)"></p>
   </section>
 </div>
+
+<script id="aao-data" type="application/json">null</script>
 <script>
-(function(){
-const _loading = document.createElement('div');
-_loading.id = 'loading-msg';
-_loading.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--paper);font-family:var(--body);font-size:1.1rem;color:var(--muted);z-index:999';
-_loading.textContent = 'Loading data…';
-document.body.appendChild(_loading);
-fetch('aao-data.json').then(r => r.json()).then(DATA => {
-document.body.removeChild(_loading);
-const D = DATA.docs.map(d => ({url:d[0], role:d[1], order:d[2], amend:d[3], iso:d[4], year:d[5], pms:d[6], hasText:d[7], sorted:d[8]}));
-const P = DATA.passages, DEP = DATA.depts, T = DATA.texts, I = DATA.items;   // I: [doc, dept, part, kind, page, text]
+(async function(){
+// The single-file version carries its data in the tag above. The website version leaves it
+// empty and reads the data files that sit beside the page in data/.
+let DATA = JSON.parse(document.getElementById('aao-data').textContent);
+const SITE = !DATA;
+const getJSON = f => fetch(f).then(r => { if (!r.ok) throw new Error(f + ': ' + r.status); return r.json(); });
+if (SITE){
+  try {
+    const [docs, deps, acts] = await Promise.all(['documents', 'departments', 'acts'].map(n => getJSON('data/' + n + '.json')));
+    DATA = {built: docs.built, docs: docs.docs, depts: deps.depts, texts: deps.texts, items: deps.items, acts: acts.acts, passages: null};
+  } catch (err) {
+    document.getElementById('stats').textContent = 'The archive data could not be loaded (' + err.message + '). ' +
+      'This page has to be opened from its web address. To use the archive from a folder, open "AAO Search.html" instead.';
+    return;
+  }
+}
+const D = DATA.docs.map(d => ({url:d[0], role:d[1], order:d[2], amend:d[3], iso:d[4], year:d[5], pms:d[6], hasText:d[7], sorted:d[8], complete:d[9], file:d[10]}));
+let P = DATA.passages;
+const DEP = DATA.depts, T = DATA.texts, I = DATA.items;   // I: [doc, dept, part, kind, page, text, under, as read]
+let passagesLoading = null;
+function needPassages(then){
+  if (P) return true;
+  if (!passagesLoading) passagesLoading = getJSON('data/passages.json').then(x => { P = x.passages; Pl = null; then(); },
+    () => { passagesLoading = null; const box = $('r-text'); box.textContent = ''; box.append(el('p', 'note', 'The full text could not be loaded. Check the connection and try again.')); });
+  return false;
+}
 const Tl = T.map(s => s.toLowerCase()), DEPl = DEP.map(s => s.toLowerCase());
 let Pl = null;
 const $ = id => document.getElementById(id);
@@ -268,7 +291,8 @@ function runItems(){
     groups.get(di).forEach(it => ul.append(el('li', '',
       `<span class="dept">${esc(deptName(DEP[it[1]]))} <span class="pg">${it[2] ? 'Part ' + esc(it[2]) + ' · ' : ''}p. ${it[4]}</span></span>` +
       `<span><span class="kind">${it[3] ? 'Act' : 'Matter'}</span>${esc(T[it[5]])}` +
-      (it[6] >= 0 ? ` <span class="pg">(listed under "${esc(T[it[6]])}")</span>` : '') + `</span>`)));
+      (it[6] >= 0 ? ` <span class="pg">(listed under "${esc(T[it[6]])}")</span>` : '') +
+      (it[7] >= 0 ? ` <span class="fix" tabindex="0" title="${esc('Misread letters put right. The scan read: ' + T[it[7]])}">corrected</span>` : '') + `</span>`)));
     e.append(ul); box.append(e);
   });
   if (docs.length > itemsShown){
@@ -293,6 +317,7 @@ function runText(){
   const box = $('r-text'); box.textContent = '';
   const ts = terms($('q-text').value.trim()), f = filters();
   if (!ts.length){ box.append(el('p', 'lead', 'Type a word or phrase to search all ' + D.filter(d => d.hasText).length + ' documents.')); return; }
+  if (!needPassages(runText)){ box.append(el('p', 'lead', 'Loading the full text of every document (about 7 MB, once)…')); return; }
   if (!Pl) Pl = P.map(p => p[2].toLowerCase());
   const okDoc = D.map(d => docOk(d, f)), hits = [];
   for (let i = 0; i < P.length; i++) if (okDoc[P[i][0]] && ts.every(r => r.test(Pl[i]))) hits.push(i);
@@ -317,17 +342,24 @@ function runDocs(){
   const f = filters(), rows = D.map((d, i) => i).filter(i => docOk(D[i], f)).sort(byDate);
   $('doccount').textContent = `${rows.length} ${rows.length === 1 ? 'document' : 'documents'}`;
   $('doctable').innerHTML = rows.map(i => { const d = D[i];
-    const cov = !d.hasText ? '<span class="pill none">No readable text</span>' : d.sorted ? '<span class="pill">Sorted by department</span>' : '<span class="pill words">Word search only</span>';
-    return `<tr><td>${esc(d.amend || d.order || 'unknown')}</td><td>${d.role === 'amendment' ? 'Amendment' : 'Order'}</td><td>${d.role === 'amendment' ? esc(d.order) : ''}</td><td>${esc(d.pms)}</td><td>${cov}</td><td>${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}</td></tr>`;
+    const cov = !d.hasText ? '<span class="pill none">No readable text</span>'
+      : d.sorted ? (d.complete ? '<span class="pill">Sorted by department</span>' : '<span class="pill" title="This document restates only some departments. The others carry on from the order before it.">Sorted: some departments</span>')
+      : '<span class="pill words">Word search only</span>';
+    const links = (d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : '') +
+      (SITE && d.file && d.hasText ? ` · <a href="data/text/${encodeURIComponent(d.file)}.txt" target="_blank" rel="noopener">Text</a>` : '');
+    return `<tr><td>${esc(d.amend || d.order || 'unknown')}</td><td>${d.role === 'amendment' ? 'Amendment' : 'Order'}</td><td>${d.role === 'amendment' ? esc(d.order) : ''}</td><td>${esc(d.pms)}</td><td>${cov}</td><td>${links}</td></tr>`;
   }).join('');
 }
 
 // ---------------- Act timeline ----------------
 const ACTS = (DATA.acts || []).map((a, i) => ({i, name: a[0], low: a[0].toLowerCase(), rows: a[1],
+  ment: (a[2] || []).map(([doc, page]) => ({doc, page})), gaps: new Set(a[3] || []),
   orders: new Set(a[1].map(r => r[0])).size}));
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const ACT_BY_SLUG = new Map(ACTS.map(a => [slug(a.name), a]));
 const SORTED = D.map((d, i) => i).filter(i => D[i].sorted && D[i].iso).sort((a, b) => D[a].iso.localeCompare(D[b].iso));
+const DEPTS_OF = new Map();      // doc -> departments it restates
+I.forEach(it => { if (!DEPTS_OF.has(it[0])) DEPTS_OF.set(it[0], new Set()); DEPTS_OF.get(it[0]).add(it[1]); });
 const LAST_ISO = D.map(d => d.iso).filter(Boolean).sort().pop();
 const nice = iso => { const [y, m, d] = iso.split('-').map(Number);
   return `${d} ${['January','February','March','April','May','June','July','August','September','October','November','December'][m - 1]} ${y}`; };
@@ -359,24 +391,32 @@ function pickAct(a){
 }
 
 // Which unsorted documents (short amendments, orders not sorted) mention this Act in their text?
-const passagesByDoc = new Map();
-P.forEach((p, i) => { if (!passagesByDoc.has(p[0])) passagesByDoc.set(p[0], []); passagesByDoc.get(p[0]).push(i); });
-function mentions(a){
-  const base = a.name.replace(/\s+(1[89]|20)\d\d$/, '');
-  const re = new RegExp(base.split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+'), 'i');
-  const out = [];
-  D.forEach((d, i) => {
-    if (d.sorted || !d.hasText || !d.iso) return;
-    const hit = (passagesByDoc.get(i) || []).find(pi => re.test(P[pi][2]));
-    if (hit !== undefined) out.push({doc: i, page: P[hit][1]});
-  });
-  return out;
-}
+// Worked out when the archive was built.
+function mentions(a){ return a.ment.filter(m => D[m.doc].iso); }
 
 function holdingsOf(a){
   const by = new Map();
-  a.rows.forEach(([doc, dept, page, q]) => { if (!by.has(doc)) by.set(doc, []); by.get(doc).push({dept, page, q}); });
+  a.rows.forEach(([doc, dept, page, q]) => { if (!by.has(doc)) by.set(doc, []); by.get(doc).push({dept, page, q, src: doc}); });
   return by;
+}
+// Who held the Act after each sorted document. A complete order restates every department, so
+// it replaces what went before. A document that restates only some departments replaces those
+// departments and leaves the rest as they were. A complete order that does not list the Act,
+// when the complete orders either side of it do, most likely lost the line when the scan was
+// read: the holding carries on, marked as uncertain.
+function statesOf(a, by){
+  let cur = [];
+  return SORTED.map(doc => {
+    const rows = by.get(doc) || [];
+    if (D[doc].complete){
+      cur = (!rows.length && a.gaps.has(doc)) ? cur.map(r => Object.assign({}, r, {uncertain: true})) : [];
+    } else {
+      const restated = DEPTS_OF.get(doc) || new Set();
+      cur = cur.filter(r => !restated.has(r.dept));
+    }
+    cur = cur.concat(rows.map(r => Object.assign({}, r, {uncertain: false})));
+    return {doc, held: cur};
+  });
 }
 function citation(doc, row){
   const d = D[doc];
@@ -391,13 +431,18 @@ function asAtCard(a, by, iso){
     return box;
   }
   const inForce = prior[prior.length - 1];
-  const rows = by.get(inForce);
+  const state = statesOf(a, by)[SORTED.indexOf(inForce)].held;
+  const rows = state.length ? state : null;
   const later = D.map((d, i) => i).filter(i => !D[i].sorted && D[i].iso && D[i].iso > D[inForce].iso && D[i].iso <= iso);
   const ment = new Set(mentions(a).map(m => m.doc));
   let html = '';
   if (rows){
-    html += `<div class="sub">On ${esc(nice(iso))}, according to the ${esc(cite(D[inForce]))}:</div><ul>` +
-      rows.map(r => `<li><span class="big">${esc(deptName(DEP[r.dept]))}</span>${r.q >= 0 ? ` <span class="sub">(${esc(T[r.q])})</span>` : ''} <span class="sub">· PDF page ${r.page}</span></li>`).join('') + '</ul>';
+    const srcs = [...new Set(rows.map(r => r.src))];
+    html += `<div class="sub">On ${esc(nice(iso))}, according to the ${srcs.map(i => esc(cite(D[i]))).join(' and the ')}:</div><ul>` +
+      rows.map(r => `<li><span class="big">${esc(deptName(DEP[r.dept]))}</span>${r.q >= 0 ? ` <span class="sub">(${esc(T[r.q])})</span>` : ''}` +
+        ` <span class="sub">· ${srcs.length > 1 ? esc(cite(D[r.src])) + ', ' : ''}PDF page ${r.page}</span></li>`).join('') + '</ul>';
+    if (rows.some(r => r.uncertain)) html += `<div class="note">The ${esc(cite(D[inForce]))} does not list this Act, although the complete orders before and after it do. The line was most likely missed when the scan was read. Check the source.</div>`;
+    if (!D[inForce].complete) html += `<div class="sub">The ${esc(cite(D[inForce]))} restates only some departments; the rest carry on from the order before it.</div>`;
   } else {
     const last = [...by.keys()].filter(i => D[i].iso <= iso).sort((x, y) => D[y].iso.localeCompare(D[x].iso))[0];
     html += `<div class="big">Not listed in the order in force on ${esc(nice(iso))}</div><div class="sub">The ${esc(cite(D[inForce]))} does not list this Act. ` +
@@ -414,7 +459,7 @@ function asAtCard(a, by, iso){
   box.innerHTML = html;
   const btn = box.querySelector('.copy');
   if (btn) btn.onclick = () => {
-    const text = rows.map(r => citation(inForce, r)).join('\n');
+    const text = rows.map(r => citation(r.src, r)).join('\n');
     const done = () => { btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy citation', 1600); };
     (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(done, () => {
       const ta = document.createElement('textarea'); ta.value = text; box.append(ta); ta.select();
@@ -424,16 +469,17 @@ function asAtCard(a, by, iso){
 }
 
 function timeline(a, by, markIso){
-  // one row per department that ever held the Act; a bar runs from each order that lists it to the next sorted order
+  // one row per department that ever held the Act; a bar runs from each sorted document after
+  // which the department held it to the next sorted document
   const lanes = [], laneOf = new Map(), segs = [];
-  SORTED.forEach((doc, k) => {
-    (by.get(doc) || []).forEach(r => {
+  statesOf(a, by).forEach(({doc, held}, k) => {
+    const end = k + 1 < SORTED.length ? D[SORTED[k + 1]].iso : null;
+    held.forEach(r => {
       if (!laneOf.has(r.dept)) { laneOf.set(r.dept, lanes.length); lanes.push(r.dept); }
-      const end = k + 1 < SORTED.length ? D[SORTED[k + 1]].iso : null;
-      const part = r.q >= 0;
+      const part = r.q >= 0, unc = !!r.uncertain;
       const prev = segs.filter(s => s.dept === r.dept).pop();
-      if (prev && prev.toDoc === k && prev.part === part) { prev.end = end; prev.toDoc = k + 1; prev.docs.push({doc, r}); }
-      else segs.push({dept: r.dept, part, start: D[doc].iso, end, toDoc: k + 1, docs: [{doc, r}]});
+      if (prev && prev.toDoc === k && prev.part === part && prev.unc === unc) { prev.end = end; prev.toDoc = k + 1; if (r.src === doc) prev.docs.push({doc, r}); }
+      else segs.push({dept: r.dept, part, unc, start: D[doc].iso, end, toDoc: k + 1, docs: r.src === doc ? [{doc, r}] : [], first: r});
     });
   });
   const ment = mentions(a);
@@ -455,10 +501,11 @@ function timeline(a, by, markIso){
     svg += `<text class="lane" x="${L}" y="${y + 11}">${esc(deptName(DEP[dept]))}</text>`;
     segs.filter(s => s.dept === dept).forEach(s => {
       const xa = X(yearOf(s.start)), xb = X(s.end ? yearOf(s.end) : yearOf(LAST_ISO) + 0.4);
-      const first = s.docs[0], lastD = s.docs[s.docs.length - 1];
       const tip = `<strong>${esc(deptName(DEP[dept]))}</strong><br>${esc(nice(s.start))} to ${s.end ? esc(nice(s.end)) : 'at least ' + esc(nice(LAST_ISO))}` +
-        `<br>${s.docs.length} order${s.docs.length === 1 ? '' : 's'}` + (s.part ? `<br>Part only: ${esc(T[first.r.q])}` : '');
-      svg += `<rect class="bar${s.part ? ' part' : ''}" x="${xa}" y="${y + 17}" width="${Math.max(3, xb - xa - 2)}" height="14" rx="3" data-tip="${esc(tip)}"></rect>`;
+        (s.unc ? '<br>Not found in this order, although listed before and after it. Most likely missed when the scan was read.'
+               : `<br>Listed in ${s.docs.length} document${s.docs.length === 1 ? '' : 's'}` + (s.docs.length ? '' : ' (carried on from an earlier order)')) +
+        (s.part ? `<br>Part only: ${esc(T[s.first.q])}` : '');
+      svg += `<rect class="bar${s.part ? ' part' : ''}${s.unc ? ' unc' : ''}" x="${xa}" y="${y + 17}" width="${Math.max(3, xb - xa - 2)}" height="14" rx="3" data-tip="${esc(tip)}"></rect>`;
     });
   });
   if (mkRow){
@@ -472,6 +519,7 @@ function timeline(a, by, markIso){
   svg += '</svg>';
   const wrap = el('div', 'chart', svg);
   wrap.append(el('div', 'legend', '<span><i class="sw"></i>Whole Act</span><span><i class="sw part"></i>Part of the Act only</span>' +
+    (segs.some(s => s.unc) ? '<span><i class="sw unc"></i>Not found in that order (likely a scanning gap)</span>' : '') +
     (mkRow ? '<span><i class="sw mk"></i>Mentioned in an unsorted document</span>' : '') +
     (markIso ? '<span>Dashed line: your date</span>' : '')));
   const tip = el('div', 'tip'); tip.hidden = true; wrap.append(tip);
@@ -513,10 +561,12 @@ function renderAct(){
   const rows = [];
   listed.forEach(doc => by.get(doc).forEach(r => rows.push({doc, r})));
   ment.forEach(m => rows.push({doc: m.doc, mention: m}));
+  a.gaps.forEach(doc => rows.push({doc, gap: true}));
   rows.sort((x, y) => D[y.doc].iso.localeCompare(D[x.doc].iso));
   const tbl = el('div', 'tablebox');
   tbl.innerHTML = '<table><thead><tr><th>Date</th><th>Document</th><th>Department</th><th>Detail</th><th>PDF page</th><th>Source</th></tr></thead><tbody>' +
     rows.map(x => { const d = D[x.doc];
+      if (x.gap) return `<tr class="warnrow"><td>${esc(nice(d.iso))}</td><td>Order</td><td>Not found</td><td>Listed in the complete orders before and after this one, but not found in it. Most likely missed when the scan was read.</td><td></td><td>${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}</td></tr>`;
       if (x.mention) return `<tr class="warnrow"><td>${esc(nice(d.iso))}</td><td>${d.role === 'amendment' ? 'Amendment' : 'Order'} (not sorted)</td><td>Check the source</td><td>Mentions this Act</td><td>${x.mention.page}</td><td>${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}</td></tr>`;
       return `<tr><td>${esc(nice(d.iso))}</td><td>${d.role === 'amendment' ? 'Amendment' : 'Order'}</td><td>${esc(deptName(DEP[x.r.dept]))}</td><td>${x.r.q >= 0 ? esc(T[x.r.q]) : ''}</td><td>${x.r.page}</td><td>${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">Open</a>` : ''}</td></tr>`;
     }).join('') + '</tbody></table>';
@@ -565,7 +615,6 @@ $('stats').textContent = `${D.length} orders and amendments, ${Y0} to ${Y1}. Eve
 $('built').textContent = 'Archive built ' + DATA.built + ' from the National Archives of Australia list of Administrative Arrangements Orders.';
 show((location.hash || '').slice(1));
 window.addEventListener('hashchange', () => show((location.hash || '').slice(1)));
-}).catch(e => { _loading.textContent = 'Error loading data: ' + e.message; });
 })();
 </script>
 
